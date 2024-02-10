@@ -156,6 +156,7 @@ time_report: bool,
 stack_report: bool,
 debug_compiler_runtime_libs: bool,
 debug_compile_errors: bool,
+debug_incremental: bool,
 job_queued_compiler_rt_lib: bool = false,
 job_queued_compiler_rt_obj: bool = false,
 job_queued_update_builtin_zig: bool,
@@ -1079,6 +1080,7 @@ pub const CreateOptions = struct {
     verbose_llvm_cpu_features: bool = false,
     debug_compiler_runtime_libs: bool = false,
     debug_compile_errors: bool = false,
+    debug_incremental: bool = false,
     /// Normally when you create a `Compilation`, Zig will automatically build
     /// and link in required dependencies, such as compiler-rt and libc. When
     /// building such dependencies themselves, this flag must be set to avoid
@@ -1508,6 +1510,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
             .test_name_prefix = options.test_name_prefix,
             .debug_compiler_runtime_libs = options.debug_compiler_runtime_libs,
             .debug_compile_errors = options.debug_compile_errors,
+            .debug_incremental = options.debug_incremental,
             .libcxx_abi_version = options.libcxx_abi_version,
             .root_name = root_name,
             .sysroot = sysroot,
@@ -1610,7 +1613,6 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
                 hash.add(options.config.use_lib_llvm);
                 hash.add(options.config.dll_export_fns);
                 hash.add(options.config.is_test);
-                hash.add(options.config.test_evented_io);
                 hash.addOptionalBytes(options.test_filter);
                 hash.addOptionalBytes(options.test_name_prefix);
                 hash.add(options.skip_linker_dependencies);
@@ -2141,7 +2143,6 @@ pub fn update(comp: *Compilation, main_progress_node: *std.Progress.Node) !void 
 
     if (comp.module) |module| {
         module.compile_log_text.shrinkAndFree(gpa, 0);
-        module.generation += 1;
 
         // Make sure std.zig is inside the import_table. We unconditionally need
         // it for start.zig.
@@ -2474,7 +2475,6 @@ fn addNonIncrementalStuffToCacheManifest(
         try addModuleTableToCacheHash(gpa, arena, &man.hash, mod.root_mod, mod.main_mod, .{ .files = man });
 
         // Synchronize with other matching comments: ZigOnlyHashStuff
-        man.hash.add(comp.config.test_evented_io);
         man.hash.addOptionalBytes(comp.test_filter);
         man.hash.addOptionalBytes(comp.test_name_prefix);
         man.hash.add(comp.skip_linker_dependencies);
@@ -2807,6 +2807,13 @@ const Header = extern struct {
         limbs_len: u32,
         string_bytes_len: u32,
         tracked_insts_len: u32,
+        src_hash_deps_len: u32,
+        decl_val_deps_len: u32,
+        namespace_deps_len: u32,
+        namespace_name_deps_len: u32,
+        first_dependency_len: u32,
+        dep_entries_len: u32,
+        free_dep_entries_len: u32,
     },
 };
 
@@ -2814,7 +2821,7 @@ const Header = extern struct {
 /// saved, such as the target and most CLI flags. A cache hit will only occur
 /// when subsequent compiler invocations use the same set of flags.
 pub fn saveState(comp: *Compilation) !void {
-    var bufs_list: [7]std.os.iovec_const = undefined;
+    var bufs_list: [19]std.os.iovec_const = undefined;
     var bufs_len: usize = 0;
 
     const lf = comp.bin_file orelse return;
@@ -2828,6 +2835,13 @@ pub fn saveState(comp: *Compilation) !void {
                 .limbs_len = @intCast(ip.limbs.items.len),
                 .string_bytes_len = @intCast(ip.string_bytes.items.len),
                 .tracked_insts_len = @intCast(ip.tracked_insts.count()),
+                .src_hash_deps_len = @intCast(ip.src_hash_deps.count()),
+                .decl_val_deps_len = @intCast(ip.decl_val_deps.count()),
+                .namespace_deps_len = @intCast(ip.namespace_deps.count()),
+                .namespace_name_deps_len = @intCast(ip.namespace_name_deps.count()),
+                .first_dependency_len = @intCast(ip.first_dependency.count()),
+                .dep_entries_len = @intCast(ip.dep_entries.items.len),
+                .free_dep_entries_len = @intCast(ip.free_dep_entries.items.len),
             },
         };
         addBuf(&bufs_list, &bufs_len, mem.asBytes(&header));
@@ -2837,6 +2851,20 @@ pub fn saveState(comp: *Compilation) !void {
         addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.items.items(.tag)));
         addBuf(&bufs_list, &bufs_len, ip.string_bytes.items);
         addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.tracked_insts.keys()));
+
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.src_hash_deps.keys()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.src_hash_deps.values()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.decl_val_deps.keys()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.decl_val_deps.values()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.namespace_deps.keys()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.namespace_deps.values()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.namespace_name_deps.keys()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.namespace_name_deps.values()));
+
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.first_dependency.keys()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.first_dependency.values()));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.dep_entries.items));
+        addBuf(&bufs_list, &bufs_len, mem.sliceAsBytes(ip.free_dep_entries.items));
 
         // TODO: compilation errors
         // TODO: files
@@ -3463,9 +3491,7 @@ pub fn performAllTheWork(
 
     if (comp.module) |mod| {
         try reportMultiModuleErrors(mod);
-    }
-
-    if (comp.module) |mod| {
+        try mod.flushRetryableFailures();
         mod.sema_prog_node = main_progress_node.start("Semantic Analysis", 0);
         mod.sema_prog_node.activate();
     }
@@ -3485,6 +3511,17 @@ pub fn performAllTheWork(
         if (comp.anon_work_queue.readItem()) |work_item| {
             try processOneJob(comp, work_item, main_progress_node);
             continue;
+        }
+        if (comp.module) |zcu| {
+            // If there's no work queued, check if there's anything outdated
+            // which we need to work on, and queue it if so.
+            if (try zcu.findOutdatedToAnalyze()) |outdated| {
+                switch (outdated.unwrap()) {
+                    .decl => |decl| try comp.work_queue.writeItem(.{ .analyze_decl = decl }),
+                    .func => |func| try comp.work_queue.writeItem(.{ .codegen_func = func }),
+                }
+                continue;
+            }
         }
         break;
     }
@@ -3509,17 +3546,14 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
             switch (decl.analysis) {
                 .unreferenced => unreachable,
                 .in_progress => unreachable,
-                .outdated => unreachable,
 
                 .file_failure,
                 .sema_failure,
-                .liveness_failure,
                 .codegen_failure,
                 .dependency_failure,
-                .sema_failure_retryable,
                 => return,
 
-                .complete, .codegen_failure_retryable => {
+                .complete => {
                     const named_frame = tracy.namedFrame("codegen_decl");
                     defer named_frame.end();
 
@@ -3554,17 +3588,15 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
             switch (decl.analysis) {
                 .unreferenced => unreachable,
                 .in_progress => unreachable,
-                .outdated => unreachable,
 
                 .file_failure,
                 .sema_failure,
                 .dependency_failure,
-                .sema_failure_retryable,
                 => return,
 
                 // emit-h only requires semantic analysis of the Decl to be complete,
                 // it does not depend on machine code generation to succeed.
-                .liveness_failure, .codegen_failure, .codegen_failure_retryable, .complete => {
+                .codegen_failure, .complete => {
                     const named_frame = tracy.namedFrame("emit_h_decl");
                     defer named_frame.end();
 
@@ -3636,7 +3668,8 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
                     "unable to update line number: {s}",
                     .{@errorName(err)},
                 ));
-                decl.analysis = .codegen_failure_retryable;
+                decl.analysis = .codegen_failure;
+                try module.retryable_failures.append(gpa, InternPool.Depender.wrap(.{ .decl = decl_index }));
             };
         },
         .analyze_mod => |pkg| {
@@ -6245,7 +6278,7 @@ fn canBuildLibCompilerRt(target: std.Target, use_llvm: bool) bool {
     }
     return switch (target_util.zigBackend(target, use_llvm)) {
         .stage2_llvm => true,
-        .stage2_x86_64 => if (target.ofmt == .elf) true else build_options.have_llvm,
+        .stage2_x86_64 => if (target.ofmt == .elf or target.ofmt == .macho) true else build_options.have_llvm,
         else => build_options.have_llvm,
     };
 }
@@ -6263,7 +6296,7 @@ fn canBuildZigLibC(target: std.Target, use_llvm: bool) bool {
     }
     return switch (target_util.zigBackend(target, use_llvm)) {
         .stage2_llvm => true,
-        .stage2_x86_64 => if (target.ofmt == .elf) true else build_options.have_llvm,
+        .stage2_x86_64 => if (target.ofmt == .elf or target.ofmt == .macho) true else build_options.have_llvm,
         else => build_options.have_llvm,
     };
 }

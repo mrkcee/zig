@@ -29,30 +29,30 @@ const AstGen = @import("AstGen.zig");
 const mingw = @import("mingw.zig");
 const Server = std.zig.Server;
 
-pub const std_options = struct {
-    pub const wasiCwd = wasi_cwd;
-    pub const logFn = log;
-    pub const enable_segfault_handler = false;
+pub const std_options = .{
+    .wasiCwd = wasi_cwd,
+    .logFn = log,
+    .enable_segfault_handler = false,
 
-    pub const log_level: std.log.Level = switch (builtin.mode) {
+    .log_level = switch (builtin.mode) {
         .Debug => .debug,
         .ReleaseSafe, .ReleaseFast => .info,
         .ReleaseSmall => .err,
-    };
+    },
 };
 
 // Crash report needs to override the panic handler
 pub const panic = crash_report.panic;
 
 var wasi_preopens: fs.wasi.Preopens = undefined;
-pub fn wasi_cwd() fs.Dir {
+pub fn wasi_cwd() std.os.wasi.fd_t {
     // Expect the first preopen to be current working directory.
     const cwd_fd: std.os.fd_t = 3;
     assert(mem.eql(u8, wasi_preopens.names[cwd_fd], "."));
-    return .{ .fd = cwd_fd };
+    return cwd_fd;
 }
 
-pub fn getWasiPreopen(name: []const u8) Compilation.Directory {
+fn getWasiPreopen(name: []const u8) Compilation.Directory {
     return .{
         .path = name,
         .handle = .{
@@ -68,11 +68,11 @@ pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
 
 /// There are many assumptions in the entire codebase that Zig source files can
 /// be byte-indexed with a u32 integer.
-pub const max_src_size = std.math.maxInt(u32);
+const max_src_size = std.math.maxInt(u32);
 
-pub const debug_extensions_enabled = builtin.mode == .Debug;
+const debug_extensions_enabled = builtin.mode == .Debug;
 
-pub const Color = enum {
+const Color = enum {
     auto,
     off,
     on,
@@ -234,7 +234,7 @@ fn verifyLibcxxCorrectlyLinked() void {
     }
 }
 
-pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     if (args.len <= 1) {
         std.log.info("{s}", .{usage});
         fatal("expected command argument", .{});
@@ -778,7 +778,7 @@ const CliModule = struct {
     rc_source_files_start: usize,
     rc_source_files_end: usize,
 
-    pub const Dep = struct {
+    const Dep = struct {
         key: []const u8,
         value: []const u8,
     };
@@ -1335,8 +1335,6 @@ fn buildOutputType(
                         create_module.each_lib_rpath = false;
                     } else if (mem.eql(u8, arg, "--test-cmd-bin")) {
                         try test_exec_args.append(null);
-                    } else if (mem.eql(u8, arg, "--test-evented-io")) {
-                        create_module.opts.test_evented_io = true;
                     } else if (mem.eql(u8, arg, "--test-no-exec")) {
                         test_no_exec = true;
                     } else if (mem.eql(u8, arg, "-ftime-report")) {
@@ -3255,6 +3253,7 @@ fn buildOutputType(
         .cache_mode = cache_mode,
         .subsystem = subsystem,
         .debug_compile_errors = debug_compile_errors,
+        .debug_incremental = debug_incremental,
         .enable_link_snapshots = enable_link_snapshots,
         .install_name = install_name,
         .entitlements = entitlements,
@@ -4932,7 +4931,7 @@ fn detectRcIncludeDirs(arena: Allocator, zig_lib_dir: []const u8, auto_includes:
     }
 }
 
-pub const usage_libc =
+const usage_libc =
     \\Usage: zig libc
     \\
     \\    Detect the native libc installation and print the resulting
@@ -4951,7 +4950,7 @@ pub const usage_libc =
     \\
 ;
 
-pub fn cmdLibC(gpa: Allocator, args: []const []const u8) !void {
+fn cmdLibC(gpa: Allocator, args: []const []const u8) !void {
     var input_file: ?[]const u8 = null;
     var target_arch_os_abi: []const u8 = "native";
     var print_includes: bool = false;
@@ -5062,7 +5061,7 @@ pub fn cmdLibC(gpa: Allocator, args: []const []const u8) !void {
     }
 }
 
-pub const usage_init =
+const usage_init =
     \\Usage: zig init
     \\
     \\   Initializes a `zig build` project in the current working
@@ -5074,7 +5073,7 @@ pub const usage_init =
     \\
 ;
 
-pub fn cmdInit(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+fn cmdInit(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     {
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
@@ -5125,7 +5124,7 @@ pub fn cmdInit(gpa: Allocator, arena: Allocator, args: []const []const u8) !void
     return cleanExit();
 }
 
-pub const usage_build =
+const usage_build =
     \\Usage: zig build [steps] [options]
     \\
     \\   Build a project from build.zig.
@@ -5149,7 +5148,7 @@ pub const usage_build =
     \\
 ;
 
-pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     var progress: std.Progress = .{ .dont_print_on_dumb = true };
 
     var build_file: ?[]const u8 = null;
@@ -5771,7 +5770,7 @@ fn readSourceFileToEndAlloc(
     return source_code;
 }
 
-pub const usage_fmt =
+const usage_fmt =
     \\Usage: zig fmt [file]...
     \\
     \\   Formats the input files and modifies them in-place.
@@ -5802,7 +5801,7 @@ const Fmt = struct {
     const SeenMap = std.AutoHashMap(fs.File.INode, void);
 };
 
-pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     var color: Color = .auto;
     var stdin_flag: bool = false;
     var check_flag: bool = false;
@@ -6189,7 +6188,7 @@ pub fn putAstErrorsIntoBundle(
     try Compilation.addZirErrorMessages(wip_errors, &file);
 }
 
-pub const info_zen =
+const info_zen =
     \\
     \\ * Communicate intent precisely.
     \\ * Edge cases matter.
@@ -6654,7 +6653,7 @@ const usage_ast_check =
     \\
 ;
 
-pub fn cmdAstCheck(
+fn cmdAstCheck(
     gpa: Allocator,
     arena: Allocator,
     args: []const []const u8,
@@ -6815,7 +6814,7 @@ pub fn cmdAstCheck(
 }
 
 /// This is only enabled for debug builds.
-pub fn cmdDumpZir(
+fn cmdDumpZir(
     gpa: Allocator,
     arena: Allocator,
     args: []const []const u8,
@@ -6875,7 +6874,7 @@ pub fn cmdDumpZir(
 }
 
 /// This is only enabled for debug builds.
-pub fn cmdChangelist(
+fn cmdChangelist(
     gpa: Allocator,
     arena: Allocator,
     args: []const []const u8,
@@ -7376,7 +7375,7 @@ fn parseRcIncludes(arg: []const u8) Compilation.RcIncludes {
         fatal("unsupported rc includes type: '{s}'", .{arg});
 }
 
-pub const usage_fetch =
+const usage_fetch =
     \\Usage: zig fetch [options] <url>
     \\Usage: zig fetch [options] <path>
     \\
